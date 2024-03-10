@@ -23,7 +23,6 @@ mod chan;
 mod context;
 mod dispatch_future;
 mod envelope;
-mod instrumentation;
 mod mailbox;
 pub mod message_channel;
 mod recv_future;

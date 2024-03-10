@@ -4,12 +4,11 @@ use std::sync::Arc;
 
 use catty::{Receiver, Sender};
 use futures_core::future::BoxFuture;
-use futures_util::FutureExt;
 
 use crate::chan::{HasPriority, MessageToAll, MessageToOne, Priority};
 use crate::context::Context;
-use crate::instrumentation::{Instrumentation, Span};
 use crate::{Actor, Handler, Mailbox};
+use futures_util::FutureExt;
 
 /// A message envelope is a struct that encapsulates a message and its return channel sender (if applicable).
 /// Firstly, this allows us to be generic over returning and non-returning messages (as all use the
@@ -23,8 +22,6 @@ pub trait MessageEnvelope: HasPriority + Send {
 
     fn set_priority(&mut self, new_priority: u32);
 
-    /// Starts the instrumentation of this message request. This will create the request span.
-    fn start_span(&mut self);
 
     /// Handle the message inside of the box by calling the relevant [`Handler::handle`] method,
     /// returning its result over a return channel if applicable. This also takes `Box<Self>` as the
@@ -34,7 +31,7 @@ pub trait MessageEnvelope: HasPriority + Send {
         self: Box<Self>,
         act: &mut Self::Actor,
         mailbox: Mailbox<Self::Actor>,
-    ) -> (BoxFuture<ControlFlow<(), ()>>, Span);
+    ) -> BoxFuture<ControlFlow<(), ()>>;
 }
 
 /// An envelope that returns a result from a message. Constructed by the `AddressExt::do_send` method.
@@ -43,7 +40,6 @@ pub struct ReturningEnvelope<A, M, R> {
     result_sender: Sender<R>,
     priority: u32,
     phantom: PhantomData<for<'a> fn(&'a A)>,
-    instrumentation: Instrumentation,
 }
 
 impl<A, M, R: Send + 'static> ReturningEnvelope<A, M, R> {
@@ -54,7 +50,6 @@ impl<A, M, R: Send + 'static> ReturningEnvelope<A, M, R> {
             result_sender: tx,
             priority,
             phantom: PhantomData,
-            instrumentation: Instrumentation::empty(),
         };
 
         (envelope, rx)
@@ -85,20 +80,13 @@ where
         self.priority = new_priority;
     }
 
-    fn start_span(&mut self) {
-        assert!(self.instrumentation.is_parent_none());
-        self.instrumentation = Instrumentation::started::<A, M>();
-    }
-
     fn handle(
         self: Box<Self>,
         act: &mut Self::Actor,
         mailbox: Mailbox<Self::Actor>,
-    ) -> (BoxFuture<ControlFlow<(), ()>>, Span) {
+    ) -> BoxFuture<ControlFlow<(), ()>> {
         let Self {
             message,
-            result_sender,
-            instrumentation,
             ..
         } = *self;
 
@@ -115,16 +103,11 @@ where
                 (r, ControlFlow::Break(()))
             }
         };
-
-        let (fut, span) = instrumentation.apply::<_>(fut);
-
-        let fut = Box::pin(fut.map(move |(r, flow)| {
-            // We don't actually care if the receiver is listening
-            let _ = result_sender.send(r);
+        let fut = Box::pin(fut.map(move |(_r, flow)| {
             flow
         }));
 
-        (fut, span)
+        fut
     }
 }
 
@@ -134,15 +117,12 @@ pub trait BroadcastEnvelope: HasPriority + Send + Sync {
 
     fn set_priority(&mut self, new_priority: u32);
 
-    /// Starts the instrumentation of this message request, if this arc is unique. This will create
-    /// the request span
-    fn start_span(&mut self);
 
     fn handle(
         self: Arc<Self>,
         act: &mut Self::Actor,
         mailbox: Mailbox<Self::Actor>,
-    ) -> (BoxFuture<ControlFlow<()>>, Span);
+    ) -> BoxFuture<ControlFlow<()>>;
 }
 
 impl<A> HasPriority for MessageToAll<A> {
@@ -155,7 +135,6 @@ pub struct BroadcastEnvelopeConcrete<A, M> {
     message: M,
     priority: u32,
     phantom: PhantomData<for<'a> fn(&'a A)>,
-    instrumentation: Instrumentation,
 }
 
 impl<A: Actor, M> BroadcastEnvelopeConcrete<A, M> {
@@ -164,7 +143,6 @@ impl<A: Actor, M> BroadcastEnvelopeConcrete<A, M> {
             message,
             priority,
             phantom: PhantomData,
-            instrumentation: Instrumentation::empty(),
         }
     }
 }
@@ -180,18 +158,14 @@ where
         self.priority = new_priority;
     }
 
-    fn start_span(&mut self) {
-        assert!(self.instrumentation.is_parent_none());
-        self.instrumentation = Instrumentation::started::<A, M>();
-    }
 
     fn handle(
         self: Arc<Self>,
         act: &mut Self::Actor,
         mailbox: Mailbox<Self::Actor>,
-    ) -> (BoxFuture<ControlFlow<(), ()>>, Span) {
-        let (msg, instrumentation) = (self.message.clone(), self.instrumentation.clone());
-        drop(self); // Drop ASAP to end the message waiting for actor span
+    ) -> BoxFuture<ControlFlow<(), ()>> {
+        let msg = self.message.clone();
+        drop(self);
         let fut = async move {
             let mut ctx = Context {
                 running: true,
@@ -205,8 +179,7 @@ where
                 ControlFlow::Break(())
             }
         };
-        let (fut, span) = instrumentation.apply::<_>(fut);
-        (Box::pin(fut), span)
+        Box::pin(fut)
     }
 }
 
@@ -224,10 +197,10 @@ impl<A> Shutdown<A> {
         Shutdown(PhantomData)
     }
 
-    pub fn handle() -> (BoxFuture<'static, ControlFlow<()>>, Span) {
+    pub fn handle() -> BoxFuture<'static, ControlFlow<()>>{
         let fut = Box::pin(async { ControlFlow::Break(()) });
 
-        (fut, Span::none())
+        fut
     }
 }
 
@@ -245,14 +218,12 @@ where
 
     fn set_priority(&mut self, _: u32) {}
 
-    // This message is not instrumented
-    fn start_span(&mut self) {}
 
     fn handle(
         self: Arc<Self>,
         _act: &mut Self::Actor,
         _mailbox: Mailbox<Self::Actor>,
-    ) -> (BoxFuture<ControlFlow<()>>, Span) {
+    ) -> BoxFuture<ControlFlow<()>> {
         Self::handle()
     }
 }

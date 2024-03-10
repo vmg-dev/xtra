@@ -110,7 +110,6 @@ impl<A> Chan<A> {
             return Err(Error::Disconnected);
         }
 
-        message.start_span();
 
         let mut inner = self.chan.lock().unwrap();
 
@@ -141,8 +140,7 @@ impl<A> Chan<A> {
         }
 
         Arc::get_mut(&mut message)
-            .expect("calling after try_send not supported")
-            .start_span();
+            .expect("calling after try_send not supported");
 
         let mut inner = self.chan.lock().unwrap();
 
